@@ -1,0 +1,43 @@
+# crontab.example — install with: crontab crontab.example (after editing paths/env below)
+#
+# Frequencies matched to each provider's actual free-tier limits (see DEPLOY.md
+# for the rate-limit numbers). Environment variables (DATABASE_URL, API keys,
+# HEALTHCHECK_URL) should be sourced from .env in each line, since cron does
+# not read your shell's environment or .env files automatically.
+
+# Load .env, then run each collector, redirecting output to its own log
+# (logging_config.py ALSO writes to logs/ingestion.log — this redirect is a
+# second, independent copy, useful if you want per-collector log files too).
+
+*/5 * * * * cd /app && set -a && . ./.env && set +a && python collectors/finnhub_collector.py >> /var/log/mac-economics/finnhub.log 2>&1
+
+# Twelve Data: 800/day free budget across 6 symbols per run = ~133 runs/day
+# headroom. Every 15 min = 96 runs/day — comfortably inside the budget.
+*/15 * * * * cd /app && set -a && . ./.env && set +a && python collectors/twelvedata_collector.py >> /var/log/mac-economics/twelvedata.log 2>&1
+
+# FRED updates most series daily at most — hourly polling is more than enough.
+0 * * * * cd /app && set -a && . ./.env && set +a && python collectors/fred_collector.py >> /var/log/mac-economics/fred.log 2>&1
+
+# Central bank statements are infrequent (scheduled meetings, occasional
+# speeches) — hourly is plenty and avoids hammering RSS feeds needlessly.
+0 * * * * cd /app && set -a && . ./.env && set +a && python collectors/central_bank_rss_collector.py >> /var/log/mac-economics/cb.log 2>&1
+
+# GDELT updates every 15 minutes upstream — matching that cadence.
+*/15 * * * * cd /app && set -a && . ./.env && set +a && python collectors/gdelt_collector.py >> /var/log/mac-economics/gdelt.log 2>&1
+
+# NewsData.io: 200 credits/day across 3 queries per run = ~66 runs/day budget.
+# Every 30 min = 48 runs/day — inside budget with room for retries.
+*/30 * * * * cd /app && set -a && . ./.env && set +a && python collectors/newsdata_collector.py >> /var/log/mac-economics/newsdata.log 2>&1
+
+# CFTC COT is published weekly (Fridays ~3:30pm ET) — checking daily is
+# harmless (upsert dedups) but there's no reason to poll more than daily.
+0 6 * * * cd /app && set -a && . ./.env && set +a && python collectors/cftc_cot_collector.py >> /var/log/mac-economics/cftc.log 2>&1
+
+# Seasonality is a computed stat over historical data — it barely changes
+# day to day. Weekly is enough.
+0 5 * * 1 cd /app && set -a && . ./.env && set +a && python collectors/seasonality_collector.py >> /var/log/mac-economics/seasonality.log 2>&1
+
+# --- Alternative: use run_all.py on one schedule instead of per-collector
+# cron lines, if you'd rather have one coarse schedule with a single dead-man
+# switch ping (see logging_config.py's ping_healthcheck) covering the whole run:
+# 0 * * * * cd /app && set -a && . ./.env && set +a && python run_all.py >> /var/log/mac-economics/run_all.log 2>&1
