@@ -8,7 +8,7 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -33,7 +33,7 @@ app.add_middleware(
 
 @app.get("/api/economic-data/{indicator}")
 @limiter.limit("60/minute")
-def economic_data(request, indicator: str, limit: int = Query(50, le=500)):
+def economic_data(request: Request, indicator: str, limit: int = Query(50, le=500)):
     rows = db.get_economic_releases(indicator=indicator, limit=limit)
     if not rows:
         raise HTTPException(status_code=404, detail=f"No data for indicator '{indicator}'")
@@ -42,44 +42,44 @@ def economic_data(request, indicator: str, limit: int = Query(50, le=500)):
 
 @app.get("/api/economic-data/recent/all")
 @limiter.limit("60/minute")
-def economic_data_recent(request):
+def economic_data_recent(request: Request):
     return db.get_recent_releases_all()
 
 
 @app.get("/api/data-quality/conflicts")
 @limiter.limit("60/minute")
-def data_conflicts(request, limit: int = Query(30, le=100)):
+def data_conflicts(request: Request, limit: int = Query(30, le=100)):
     return db.get_recent_conflicts(limit=limit)
 
 
 @app.get("/api/central-banks/{code}/statements")
 @limiter.limit("60/minute")
-def central_bank_statements(request, code: str, limit: int = Query(20, le=100)):
+def central_bank_statements(request: Request, code: str, limit: int = Query(20, le=100)):
     rows = db.get_policy_statements(central_bank=code.upper(), limit=limit)
     return rows
 
 
 @app.get("/api/markets")
 @limiter.limit("60/minute")
-def markets(request, asset_class: str | None = Query(None)):
+def markets(request: Request, asset_class: str | None = Query(None)):
     return db.get_market_quotes(asset_class=asset_class)
 
 
 @app.get("/api/news")
 @limiter.limit("60/minute")
-def news(request, limit: int = Query(20, le=100)):
+def news(request: Request, limit: int = Query(20, le=100)):
     return db.get_news(limit=limit)
 
 
 @app.get("/api/positioning/cot")
 @limiter.limit("60/minute")
-def cot(request, market: str | None = Query(None)):
+def cot(request: Request, market: str | None = Query(None)):
     return db.get_cot_reports(market_and_exchange=market)
 
 
 @app.get("/api/seasonality")
 @limiter.limit("60/minute")
-def seasonality(request, symbol: str | None = Query(None)):
+def seasonality(request: Request, symbol: str | None = Query(None)):
     return db.get_seasonality(symbol=symbol)
 
 
@@ -90,7 +90,7 @@ def health():
 
 @app.post("/api/test-connection")
 @limiter.limit("30/minute")
-def test_connection(request, payload: dict = Body(...)):
+def test_connection(request: Request, payload: dict = Body(...)):
     provider = payload.get("provider", "")
     key = payload.get("key", "")
     if provider not in PROVIDER_URLS:
