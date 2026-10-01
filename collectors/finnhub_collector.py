@@ -1,10 +1,24 @@
 """
 finnhub_collector.py — REAL, working ingestion against the Finnhub API.
 
-Recommended pick #1 for market data: most generous general-purpose free
-tier available today (60 calls/min, no credit card required). Covers FX
-quotes and general market news, which fills the gap FRED doesn't cover
-(FRED has almost no live FX or equity index pricing).
+CORRECTED: the original version of this file tried to fetch forex quotes
+(OANDA:EUR_USD etc.) via /quote. That's a mistake — Finnhub's free tier
+does NOT include forex data at all; /forex/* and forex-symbol /quote calls
+return HTTP 403 "You don't have access to this resource" regardless of how
+valid the key is (confirmed against Finnhub's own GitHub issue tracker).
+Free tier is real-time US EQUITIES ONLY, 60 calls/min.
+
+So this now fetches major US-listed ETFs as liquid, real-time-tradeable
+proxies for the indices/commodities the dashboard cares about — these are
+ordinary US equities as far as Finnhub's API is concerned, so they work
+perfectly on the free tier. They're intentionally stored under distinct
+symbol names (e.g. "SPY (ETF)", not "S&P 500") rather than reused as if
+interchangeable with the index/spot-commodity figures Twelve Data provides
+— an ETF share price is not the same number as the index level or the spot
+commodity price it tracks (SPY trades near 1/10th the S&P 500 index level,
+GLD near 1/10th an ounce of gold), so merging them under the same symbol
+would create false "conflicts" in verify_sources.py and misleading numbers
+on the dashboard. Keeping them distinct avoids both problems honestly.
 
 Setup:
     1. Free API key (no credit card): https://finnhub.io/register
@@ -31,18 +45,17 @@ logger = setup_logging()
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 BASE = "https://finnhub.io/api/v1"
 
-# Finnhub forex symbols use the OANDA:XXX_YYY convention on the free tier.
-FX_SYMBOLS = {
-    "EUR/USD": "OANDA:EUR_USD",
-    "GBP/USD": "OANDA:GBP_USD",
-    "USD/JPY": "OANDA:USD_JPY",
-    "USD/CAD": "OANDA:USD_CAD",
-    "AUD/USD": "OANDA:AUD_USD",
-    "NZD/USD": "OANDA:NZD_USD",
-    "USD/ZAR": "OANDA:USD_ZAR",
-    "USD/MXN": "OANDA:USD_MXN",
-    "USD/CHF": "OANDA:USD_CHF",
-}
+# Real US-listed equities/ETFs — genuinely covered by Finnhub's free tier.
+# (label, ticker, asset_class) — label is deliberately distinct from the
+# plain index/commodity names Twelve Data uses, for the reason explained above.
+ETF_PROXIES = [
+    ("SPY (S&P 500 ETF)", "SPY", "equity_index"),
+    ("QQQ (Nasdaq 100 ETF)", "QQQ", "equity_index"),
+    ("DIA (Dow Jones ETF)", "DIA", "equity_index"),
+    ("GLD (Gold ETF)", "GLD", "commodity"),
+    ("SLV (Silver ETF)", "SLV", "commodity"),
+    ("USO (Oil ETF)", "USO", "commodity"),
+]
 
 
 def get_quote(symbol):
@@ -61,26 +74,26 @@ def run():
         url="https://finnhub.io/api/v1",
         category="markets",
         reliability_tier=2,
-        country="Global",
+        country="United States",
     )
 
     stored = 0
-    for pair, symbol in FX_SYMBOLS.items():
+    for label, ticker, asset_class in ETF_PROXIES:
         try:
-            q = get_quote(symbol)
+            q = get_quote(ticker)
         except requests.RequestException as e:
-            logger.warning("Skipping %s: request failed after retries — %s", pair, e)
+            logger.warning("Skipping %s: request failed after retries — %s", label, e)
             continue
 
         if q.get("c") in (None, 0):
-            logger.warning("Skipping %s: no data returned for %s", pair, symbol)
+            logger.warning("Skipping %s: no data returned for %s (error: %s)", label, ticker, q.get("error"))
             continue
 
         quote_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
         insert_market_quote(
             provider="finnhub",
-            symbol=pair,
-            asset_class="fx",
+            symbol=label,
+            asset_class=asset_class,
             price=q["c"],
             change_pct=q.get("dp"),
             quote_time=quote_time,
@@ -89,7 +102,7 @@ def run():
         stored += 1
         time.sleep(1.1)  # stay comfortably under 60 calls/min
 
-    logger.info("Finnhub FX quotes: %d pairs stored", stored)
+    logger.info("Finnhub ETF quotes: %d/%d stored", stored, len(ETF_PROXIES))
     logger.info("Finnhub ingestion complete.")
 
 
