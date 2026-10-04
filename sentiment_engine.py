@@ -42,7 +42,7 @@ import os
 from datetime import datetime, timezone
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from db import init_db, get_conn, insert_risk_regime_score  # noqa: E402
+from db import init_db, get_conn, insert_risk_regime_score, _q  # noqa: E402
 from logging_config import setup_logging  # noqa: E402
 
 logger = setup_logging()
@@ -56,8 +56,8 @@ def _latest_economic_value(indicator):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT value FROM economic_releases WHERE indicator = ? "
-        "ORDER BY reference_date DESC LIMIT 1",
+        _q("SELECT value FROM economic_releases WHERE indicator = ? "
+           "ORDER BY reference_date DESC LIMIT 1"),
         (indicator,),
     )
     row = cur.fetchone()
@@ -71,8 +71,8 @@ def _latest_quote_change_pct(symbol_substring):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT change_pct FROM market_quotes WHERE symbol LIKE ? "
-        "ORDER BY quote_time DESC LIMIT 1",
+        _q("SELECT change_pct FROM market_quotes WHERE symbol LIKE ? "
+           "ORDER BY quote_time DESC LIMIT 1"),
         (f"%{symbol_substring}%",),
     )
     row = cur.fetchone()
