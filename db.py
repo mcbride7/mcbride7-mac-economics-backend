@@ -170,6 +170,14 @@ def init_db():
             gld_change_pct DOUBLE PRECISION,
             computed_at TIMESTAMPTZ NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS statement_texts (
+            id SERIAL PRIMARY KEY,
+            link TEXT NOT NULL UNIQUE,
+            full_text TEXT,
+            status TEXT NOT NULL,
+            char_count INTEGER,
+            fetched_at TIMESTAMPTZ NOT NULL
+        );
         """
     else:
         ddl = """
@@ -286,6 +294,14 @@ def init_db():
             spy_change_pct REAL,
             gld_change_pct REAL,
             computed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS statement_texts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            link TEXT NOT NULL UNIQUE,
+            full_text TEXT,
+            status TEXT NOT NULL,
+            char_count INTEGER,
+            fetched_at TEXT NOT NULL
         );
         """
 
@@ -708,6 +724,137 @@ def get_latest_risk_regime_score():
     result = dict(zip(cols, row))
     conn.close()
     return result
+
+
+def get_policy_statements_raw(central_bank, limit=300):
+    """Most recently INSERTED rows for a bank (not date-sorted — published_at is
+    free-form text from RSS, so chronological ordering is done in Python by
+    statement_analysis.select_statements)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT ps.central_bank, ps.title, ps.published_at, ps.link, ps.summary, "
+           "s.category AS source_category FROM policy_statements ps "
+           "LEFT JOIN sources s ON s.id = ps.source_id "
+           "WHERE ps.central_bank = ? ORDER BY ps.id DESC LIMIT ?"),
+        (central_bank, limit),
+    )
+    result = _rows_to_dicts(cur)
+    conn.close()
+    return result
+
+
+def upsert_statement_text(link, full_text, status):
+    """status: 'ok' | 'manual' (pasted by the user) | 'too_short' | 'robots_disallowed' | 'not_html' | 'fetch_error'."""
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    cur.execute(
+        _q("""
+        INSERT INTO statement_texts (link, full_text, status, char_count, fetched_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(link) DO UPDATE SET
+            full_text=excluded.full_text, status=excluded.status,
+            char_count=excluded.char_count, fetched_at=excluded.fetched_at
+        """),
+        (link, full_text, status, len(full_text) if full_text else 0, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_statement_texts(links):
+    """Returns {link: {"text": str|None, "status": str, "chars": int}}."""
+    links = [l for l in links if l]
+    if not links:
+        return {}
+    placeholders = ",".join(["?"] * len(links))
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q(f"SELECT link, full_text, status, char_count FROM statement_texts WHERE link IN ({placeholders})"),
+        tuple(links),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return {r[0]: {"text": r[1], "status": r[2], "chars": r[3] or 0} for r in rows}
+
+
+def get_statement_links_without_text(limit=600):
+    """Policy-statement rows we have never tried to fetch full text for."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT ps.central_bank, ps.title, ps.published_at, ps.link FROM policy_statements ps "
+           "LEFT JOIN statement_texts st ON st.link = ps.link "
+           "WHERE st.link IS NULL AND ps.link IS NOT NULL AND ps.link <> '' "
+           "ORDER BY ps.id DESC LIMIT ?"),
+        (limit,),
+    )
+    result = _rows_to_dicts(cur)
+    conn.close()
+    return result
+
+
+def insert_manual_statement(central_bank, title, published_at, link):
+    """Adds a statement the user entered by hand. It lives in the same table as
+    fetched statements (so all analysis works unchanged) but is tagged through
+    its source (category 'manual') so it can be recognised, preferred and
+    removed. Returns False if that link already exists for any bank."""
+    source_id = upsert_source("Manual entry", "manual://entry", "manual", 1, None)
+    return insert_policy_statement(central_bank, title, published_at, link, "", source_id)
+
+
+def statement_belongs_to_bank(central_bank, link):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT 1 FROM policy_statements WHERE central_bank = ? AND link = ? LIMIT 1"),
+        (central_bank, link),
+    )
+    found = cur.fetchone() is not None
+    conn.close()
+    return found
+
+
+def is_manual_statement(central_bank, link):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT 1 FROM policy_statements ps JOIN sources s ON s.id = ps.source_id "
+           "WHERE ps.central_bank = ? AND ps.link = ? AND s.category = 'manual' LIMIT 1"),
+        (central_bank, link),
+    )
+    found = cur.fetchone() is not None
+    conn.close()
+    return found
+
+
+def delete_manual_statement(central_bank, link):
+    """Deletes a statement that was entered manually, plus its text. Refuses
+    (returns False) for anything that came from a real feed, so this can never
+    be used to delete ingested data."""
+    if not is_manual_statement(central_bank, link):
+        return False
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM statement_texts WHERE link = ?"), (link,))
+    cur.execute(_q("DELETE FROM policy_statements WHERE central_bank = ? AND link = ?"), (central_bank, link))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_manual_text(link):
+    """Removes pasted text attached to a fetched statement, reverting it to the
+    automatic path. Only touches rows whose status is 'manual'."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM statement_texts WHERE link = ? AND status = 'manual'"), (link,))
+    removed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return removed
 
 
 def get_recent_conflicts(limit=30):
